@@ -204,11 +204,21 @@ int gl_VOL_STEPS[]= {11,16,21};  // used for VOL_BTN only: user defined audio vo
 // I recommend: change the line above to:
 // #define pin_I2S_BCLK    7           // GPIO7 (D8) - move your red LED if needed
 
-// === LEDs (your wiring) ===
-#define pin_LED_RED     7           // D8
-#define pin_LED_GREEN   8           // D9
-#define pin_LED_BLUE    9          // D10
-#define flg_LED_DIGITAL true
+// === 3 Types of LEDs ===
+// 1. RGB LEDs (Digital control via GPIO - can only be ON/OFF, not PWM compatible)
+#define pin_LED_RED     7           // D8 - Digital RGB LED (Red)
+#define pin_LED_GREEN   8           // D9 - Digital RGB LED (Green)
+#define pin_LED_BLUE    9           // D10 - Digital RGB LED (Blue)
+#define flg_LED_DIGITAL false       // Note: These are being driven through transistors
+
+// 2. Main White Strip LED (PWM-capable for brightness control)
+#define pin_LED_MAIN    10          // D11 - PWM pin for 12V White Strip via MOSFET
+
+// 3. Status Indicator LED (Fast blinking capability)
+#define pin_LED_STATUS  11          // D12 - Status indicator LED
+
+enum BotState { IDLE, LISTENING, PROCESSING, SPEAKING };
+BotState bot_state = IDLE;
 
 // === Buttons ===
 #define pin_RECORD_BTN  43          // tactile button at D6 = GPIO43
@@ -245,6 +255,9 @@ String SpeechToText_ElevenLabs( String audio_filename, uint8_t* PSRAM, long PSRA
 String OpenAI_Groq_LLM( String UserRequest, const char* llm_open_key, bool flg_WebSearch, const char* llm_groq_key );
 void   get_tts_param( int* id, String* names, String* model, String* voice, String* vspeed, String* inst, String* hello );
 
+void run_LED_Effects();
+void led_RGB( bool red, bool green, bool blue );
+
 
 
 
@@ -252,95 +265,100 @@ void   get_tts_param( int* id, String* names, String* model, String* voice, Stri
 
 void setup() 
 {   
-  // Initialize serial communication
-  Serial.begin(115200); 
-  Serial.setTimeout(100);    // 10 times faster reaction after CR entered (default is 1000ms)
+   // Initialize serial communication
+   Serial.begin(115200); 
+   Serial.setTimeout(100);    // 10 times faster reaction after CR entered (default is 1000ms)
 
-  // OUTPUT pin assignments / RGB led testing on Power ON (OUTPUT pins will be assigned below again due ESP32-S3 bug)
-  pinMode(pin_LED_RED, OUTPUT);  pinMode(pin_LED_GREEN, OUTPUT);  pinMode(pin_LED_BLUE, OUTPUT);
-  // on INIT: walk 1 sec thru 3 RGB colors (RED -> GREEN -> BLUE) .. then stay on YELLOW until WiFi connected
-  led_RGB(LOW,LOW,LOW);   // init function led_RGB()  
-  led_RGB(LOW,HIGH,HIGH); delay (330);  // ## RED 
-  led_RGB(HIGH,LOW,HIGH); delay (330);  // ## GREEN
-  led_RGB(HIGH,HIGH,LOW); delay (330);  // ## BLUE
-  led_RGB(LOW,LOW,HIGH);                // ## YELLOW ...
-
-  // Digital INPUT pin assignments (not needed for analogue pin_VOL_POTI & pin_TOUCH)
-  // Detail: Some ESP32 pins do NOT support INPUT_PULLUP (e.g. pins 34-39), external resistor still needed
-  if (pin_RECORD_BTN != NO_PIN) {pinMode(pin_RECORD_BTN,INPUT_PULLUP); }  
-  if (pin_VOL_BTN    != NO_PIN) {pinMode(pin_VOL_BTN,   INPUT_PULLUP); }  
- 
-  // Calibration: measure initial TOUCH PIN idle value (untouched), used as reference to recognize TOUCH event
-  gl_TOUCH_RELEASED = touchRead(pin_TOUCH);  
+   // OUTPUT pin assignments / RGB led testing on Power ON (OUTPUT pins will be assigned below again due ESP32-S3 bug)
+   pinMode(pin_LED_RED, OUTPUT);  pinMode(pin_LED_GREEN, OUTPUT);  pinMode(pin_LED_BLUE, OUTPUT);
+   pinMode(pin_LED_MAIN, OUTPUT);  
+   pinMode(pin_LED_STATUS, OUTPUT);
    
-  // Hello World
-  Serial.println( VERSION );  
+   // on INIT: walk 1 sec thru RGB colors (RED -> GREEN -> BLUE) .. then stay on YELLOW until WiFi connected
+   led_RGB(LOW,LOW,LOW);   // init function led_RGB()  
+   led_RGB(LOW,HIGH,HIGH); delay (330);  // ## RED 
+   led_RGB(HIGH,LOW,HIGH); delay (330);  // ## GREEN
+   led_RGB(HIGH,HIGH,LOW); delay (330);  // ## BLUE
+   led_RGB(LOW,LOW,HIGH);                // ## YELLOW ...
+
+   // Digital INPUT pin assignments (not needed for analogue pin_VOL_POTI & pin_TOUCH)
+   // Detail: Some ESP32 pins do NOT support INPUT_PULLUP (e.g. pins 34-39), external resistor still needed
+   if (pin_RECORD_BTN != NO_PIN) {pinMode(pin_RECORD_BTN,INPUT_PULLUP); }  
+   if (pin_VOL_BTN    != NO_PIN) {pinMode(pin_VOL_BTN,   INPUT_PULLUP); }  
+ 
+   // Calibration: measure initial TOUCH PIN idle value (untouched), used as reference to recognize TOUCH event
+   gl_TOUCH_RELEASED = touchRead(pin_TOUCH);  
+   
+   // Hello World
+   Serial.println( VERSION );  
   
-  // I2S_Recording_Init() initializes KALO I2S Recording Services (don't forget!)
-  // - function checks SD Card, allocates PSRAM buffer, init I2S assignments 
-  // - in case of ERROR: print ERROR, then stop (staying there forever):
-  // - also printing some hardware details (e.g PSRAM) in DEBUG mode
+   // I2S_Recording_Init() initializes KALO I2S Recording Services (don't forget!)
+   // - function checks SD Card, allocates PSRAM buffer, init I2S assignments 
+   // - in case of ERROR: print ERROR, then stop (staying there forever):
+   // - also printing some hardware details (e.g PSRAM) in DEBUG mode
   
-  I2S_Recording_Init();    
+   I2S_Recording_Init();    
       
-  // Connecting to WLAN
-  WiFi.mode(WIFI_STA);                                 
-  WiFi.begin(ssid, password);         
-  Serial.print("> Connecting WLAN " );
-  while (WiFi.status() != WL_CONNECTED)                 
-  { Serial.print(".");  delay(500); 
-  } 
-  Serial.println(". Done, device connected.");
-  led_RGB( HIGH,LOW,HIGH );   // LED ## GREEN: device connected
+   // Connecting to WLAN
+   WiFi.mode(WIFI_STA);                                 
+   WiFi.begin(ssid, password);         
+   Serial.print("> Connecting WLAN " );
+   while (WiFi.status() != WL_CONNECTED)                 
+   { Serial.print(".");  delay(500); 
+   } 
+   Serial.println(". Done, device connected.");
+   led_RGB( HIGH,LOW,HIGH );   // LED ## GREEN: device connected
     
-  // INIT Audio Output (via Audio.h, see here: https://github.com/schreibfaul1/ESP32-audioI2S)
-  audio_play.setPinout( pin_I2S_BCLK, pin_I2S_LRC, pin_I2S_DOUT );
+   // INIT Audio Output (via Audio.h, see here: https://github.com/schreibfaul1/ESP32-audioI2S)
+   audio_play.setPinout( pin_I2S_BCLK, pin_I2S_LRC, pin_I2S_DOUT );
 
-  // INIT SD Card Reader [SPI.begin() & SD.begin()] for optional SD Card (## NEW / 2026-01 Update)
-  bool flg_SD_found;   // check if SD Cards Reader with SD Card available (supporting custom pins)       
-  if (SD_SCK != NO_PIN && SD_MISO != NO_PIN && SD_MOSI != NO_PIN && SD_CS != NO_PIN)    
-  {  SPI.begin( SD_SCK, SD_MISO, SD_MOSI, SD_CS );       // using predefined SPI instance (VSPI bus): no 'var SPIClass' needed   
-     delay(100);                                         // ## NEW 2026-01-18: waiting until Vcc 100% stable on SD card module
-     flg_SD_found = SD.begin( SD_CS, SPI, 10000000 );    // ## NEW 2026-01-18: using 10 Mhz instead (40 or 80 MHz)   
-     /* Alternative: using 2nd SPI controller (HSPI bus) for SD card in case VSPI needed for e.g. display connctor): 
-        .. SPIClass spiSD(HSPI) ... spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS) ... SD.begin(SD_CS, spiSD, 40000000)  
-        Info link:  https://randomnerdtutorials.com/esp32-microsd-card-arduino/#sdcardcustompins 
-        example global SPI: https://github.com/schreibfaul1/ESP32-audioI2S/blob/master/examples/I2Saudio_SD/I2Saudio_SD.cpp 
-     */
-  }  else { flg_SD_found = SD.begin(); }   // no custom pins -> initializing SD card with default VSPI or HSPI pins  
+   // INIT SD Card Reader [SPI.begin() & SD.begin()] for optional SD Card (## NEW / 2026-01 Update)
+   bool flg_SD_found;   // check if SD Cards Reader with SD Card available (supporting custom pins)       
+   if (SD_SCK != NO_PIN && SD_MISO != NO_PIN && SD_MOSI != NO_PIN && SD_CS != NO_PIN)    
+   {  SPI.begin( SD_SCK, SD_MISO, SD_MOSI, SD_CS );       // using predefined SPI instance (VSPI bus): no 'var SPIClass' needed   
+      delay(100);                                         // ## NEW 2026-01-18: waiting until Vcc 100% stable on SD card module
+      flg_SD_found = SD.begin( SD_CS, SPI, 10000000 );    // ## NEW 2026-01-18: using 10 Mhz instead (40 or 80 MHz)   
+      /* Alternative: using 2nd SPI controller (HSPI bus) for SD card in case VSPI needed for e.g. display connctor): 
+         .. SPIClass spiSD(HSPI) ... spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS) ... SD.begin(SD_CS, spiSD, 40000000)  
+         Info link:  https://randomnerdtutorials.com/esp32-microsd-card-arduino/#sdcardcustompins 
+         example global SPI: https://github.com/schreibfaul1/ESP32-audioI2S/blob/master/examples/I2Saudio_SD/I2Saudio_SD.cpp 
+      */
+   }  else { flg_SD_found = SD.begin(); }   // no custom pins -> initializing SD card with default VSPI or HSPI pins  
   
-  // HELLO - Optional: Playing a optional WELCOME_FILE wav file on SD Card once (with reduced fixed volume)
-  // feature can be used on any ESP32 with SD card (independent of Recording settings RECORD_PSRAM vs. RECORD_SDCARD)
-  if ( flg_SD_found )   
-  {  if ( SD.exists( WELCOME_FILE ) )
-     {  audio_play.setVolume(8);    // supported values: 0-21. Playing Welcome file ALWAYS with reduced volume (e.g. 8)   
-        audio_play.connecttoFS( SD, WELCOME_FILE );  
-        // using 'isRunning()' trick to wait in setup() until PLAY is done (when done: proceed with next WELCOME_MSG below)
-        while (audio_play.isRunning()) { audio_play.loop(); }
-     }     
-  } 
+   // HELLO - Optional: Playing a optional WELCOME_FILE wav file on SD Card once (with reduced fixed volume)
+   // feature can be used on any ESP32 with SD card (independent of Recording settings RECORD_PSRAM vs. RECORD_SDCARD)
+   if ( flg_SD_found )   
+   {  if ( SD.exists( WELCOME_FILE ) )
+      {  audio_play.setVolume(8);    // supported values: 0-21. Playing Welcome file ALWAYS with reduced volume (e.g. 8)   
+         audio_play.connecttoFS( SD, WELCOME_FILE );  
+         // using 'isRunning()' trick to wait in setup() until PLAY is done (when done: proceed with next WELCOME_MSG below)
+         while (audio_play.isRunning()) { audio_play.loop(); }
+      }     
+   } 
 
-  // Next line looks strange: REPEATING output pinMode assigments ! / Reason: well known ESP32-S3 issue (S3 only):
-  // .. certain ESP-S3 pins 'forget' OUTPUT assignments after I2S init, and frequently after launching 'SD.begin()'!
-  pinMode(pin_LED_RED, OUTPUT);  pinMode(pin_LED_GREEN, OUTPUT);  pinMode(pin_LED_BLUE, OUTPUT);
-  led_RGB( HIGH,HIGH,HIGH ); led_RGB( HIGH,LOW,HIGH );   // LED: init again, ## OFF -> back to ## GREEN
+   // Next line looks strange: REPEATING output pinMode assigments ! / Reason: well known ESP32-S3 issue (S3 only):
+   // .. certain ESP-S3 pins 'forget' OUTPUT assignments after I2S init, and frequently after launching 'SD.begin()'!
+   pinMode(pin_LED_RED, OUTPUT);  pinMode(pin_LED_GREEN, OUTPUT);  pinMode(pin_LED_BLUE, OUTPUT);
+   led_RGB( HIGH,HIGH,HIGH ); led_RGB( HIGH,LOW,HIGH );   // LED: init again, ## OFF -> back to ## GREEN
+   pinMode(pin_LED_MAIN, OUTPUT);  
+   pinMode(pin_LED_STATUS, OUTPUT);
 
-  // Initialize user defined Audio Volume (values 0-21), not relevant in case VOL_POTI used (bc. continous reading in loop())
-  audio_play.setVolume( gl_VOL_INIT );  
+   // Initialize user defined Audio Volume (values 0-21), not relevant in case VOL_POTI used (bc. continous reading in loop())
+   audio_play.setVolume( gl_VOL_INIT );  
   
-  // HELLO - Speak the FRIEND (Agent) specific a FRIENDS[].welcome sentence (with FRIEND specific settings/voice)  
-  TextToSpeech( "#WELCOME" );      // '#WELCOME' triggers an internal command in TextToSpeech()
+   // HELLO - Speak the FRIEND (Agent) specific a FRIENDS[].welcome sentence (with FRIEND specific settings/voice)  
+   TextToSpeech( "#WELCOME" );      // '#WELCOME' triggers an internal command in TextToSpeech()
   
-  // INIT done, starting user interaction  
-  Serial.println( "\nWorkflow:\n> Hold or Touch button during recording voice -OR- enter request in Serial Monitor" );  
-  Serial.println( "> Select another AI FRIEND by calling his NAME, example: \"Hi FRED, are you online?\"" );  
-  Serial.println( "> Key word [GOOGLE] inside request: toggle LLM to Open AI realtime web search model" );  
-  Serial.println( "> Key word [VOICE]  inside request: use request as Open AI TTS 'voice instruction'" );
-  Serial.println( "> Key word [RADIO | DAILY NEWS | TAGESSCHAU] inside request: start audio url streaming" );  
-  Serial.println( "> Command [#] or speaking [HASHTAG]: print CHAT history & Friends list in Serial Monitor" );  
-  Serial.println( "> Command [@] or Key word [EMAIL] inside request: send CHAT history to user via email" );  
-  Serial.println( "> Command [DEBUG ON|OFF]: enable|disable workflow details in Serial Monitor\n" );  
-  Serial.println( "========================================================================================\n"); 
+   // INIT done, starting user interaction  
+   Serial.println( "\nWorkflow:\n> Hold or Touch button during recording voice -OR- enter request in Serial Monitor" );  
+   Serial.println( "> Select another AI FRIEND by calling his NAME, example: \"Hi FRED, are you online?\"" );  
+   Serial.println( "> Key word [GOOGLE] inside request: toggle LLM to Open AI realtime web search model" );  
+   Serial.println( "> Key word [VOICE]  inside request: use request as Open AI TTS 'voice instruction'" );
+   Serial.println( "> Key word [RADIO | DAILY NEWS | TAGESSCHAU] inside request: start audio url streaming" );  
+   Serial.println( "> Command [#] or speaking [HASHTAG]: print CHAT history & Friends list in Serial Monitor" );  
+   Serial.println( "> Command [@] or Key word [EMAIL] inside request: send CHAT history to user via email" );  
+   Serial.println( "> Command [DEBUG ON|OFF]: enable|disable workflow details in Serial Monitor\n" );  
+   Serial.println( "========================================================================================\n"); 
 
 }
 
@@ -350,324 +368,337 @@ void setup()
 
 void loop() 
 {
-  String UserRequest;                   // user request, initialized new each loop pass 
-  String LLM_Feedback;                  // LLM AI response
-  static String LLM_Feedback_before;    // static var to keep information from last request (as alternative to global var)
-  static bool flg_UserStoppedAudio;     // both static vars are used for 'Press button' actions (stop Audio a/o repeat LLM)
+   String UserRequest;                   // user request, initialized new each loop pass 
+   String LLM_Feedback;                  // LLM AI response
+   static String LLM_Feedback_before;    // static var to keep information from last request (as alternative to global var)
+   static bool flg_UserStoppedAudio;     // both static vars are used for 'Press button' actions (stop Audio a/o repeat LLM)
 
-  String   record_SDfile;               // 4 vars are used for receiving recording details               
-  uint8_t* record_buffer;
-  long     record_bytes;
-  float    record_seconds;  
+   String   record_SDfile;               // 4 vars are used for receiving recording details               
+   uint8_t* record_buffer;
+   long     record_bytes;
+   float    record_seconds;  
   
   
-  // ------ Read USER INPUT via Serial Monitor (fill String UserRequest and ECHO after CR entered) ------------------------------
-  // ESP32 as TEXT Chat device: this allows to use the Serial Monitor as an LLM AI text chat device  
-  // HINT: hidden feature (covered in lib_openai_groq.ino): Keyword '#' in Serial Monitor prints the history of complete dialog
+   // ------ Read USER INPUT via Serial Monitor (fill String UserRequest and ECHO after CR entered) ------------------------------
+   // ESP32 as TEXT Chat device: this allows to use the Serial Monitor as an LLM AI text chat device  
+   // HINT: hidden feature (covered in lib_openai_groq.ino): Keyword '#' in Serial Monitor prints the history of complete dialog
   
-  while (Serial.available() > 0)                        // definition: returns numbers ob chars after CR done
-  { // we end up here only after Input done             // this 'while loop' is a NOT blocking loop script :)
-    UserRequest = Serial.readStringUntil('\n');                                                                     
+   while (Serial.available() > 0)                        // definition: returns numbers ob chars after CR done
+   { // we end up here only after Input done             // this 'while loop' is a NOT blocking loop script :)
+     UserRequest = Serial.readStringUntil('\n');                                                                     
    
-    // Clean the input line first:
-    UserRequest.replace("\r", "");  UserRequest.replace("\n", "");   UserRequest.trim();
+     // Clean the input line first:
+     UserRequest.replace("\r", "");  UserRequest.replace("\n", "");   UserRequest.trim();
     
-    // then ECHO in monitor in [brackets] (in case the user entered more than spaces or CR only): 
-    if (UserRequest != "")
-    {  Serial.println( "\nYou> [" + UserRequest + "]" );      
-    }  
-  }  
+     // then ECHO in monitor in [brackets] (in case the user entered more than spaces or CR only): 
+     if (UserRequest != "")
+     {  Serial.println( "\nYou> [" + UserRequest + "]" );      
+     }  
+   }  
 
 
-  // ------ Check status of AUDIO RECORDING controls (supporting PUSH buttons and TOUCH buttons) --------------------------------
+   // ------ Check status of AUDIO RECORDING controls (supporting PUSH buttons and TOUCH buttons) --------------------------------
    
-  bool flg_RECORD_BTN;               // both flags used to trigger recording AND for RGB led status at eof loop()
-  bool flg_RECORD_TOUCH;
+   bool flg_RECORD_BTN;               // both flags used to trigger recording AND for RGB led status at eof loop()
+   bool flg_RECORD_TOUCH;
     
-  // 1. PUSH BUTTON (if available) - check RECORD BUTTON status LOW & HIGH (result: flg_RECORD_BTN is LOW | HIGH) 
+   // 1. PUSH BUTTON (if available) - check RECORD BUTTON status LOW & HIGH (result: flg_RECORD_BTN is LOW | HIGH) 
   
-  if (pin_RECORD_BTN != NO_PIN)   
-  {  flg_RECORD_BTN = digitalRead(pin_RECORD_BTN);
-  }  else flg_RECORD_BTN = HIGH;  // no button available -> never pressed
+   if (pin_RECORD_BTN != NO_PIN)   
+   {  flg_RECORD_BTN = digitalRead(pin_RECORD_BTN);
+   }  else flg_RECORD_BTN = HIGH;  // no button available -> never pressed
   
-  // 2. TOUCH BUTTON (if available) - check if finger is touching button (result: flg_RECORD_TOUCH is true | false) 
-  /* Detail: ESP32 and ESP32-S3 return totally different touch values !, code below should handle both scenarios
-  // ESP32:    low  uint16_t values !, examples: idle values (UN-touched) ~ 70-80, TOUCHED: 'falls down to' about 10-40
-  // ESP32-S3: high uint36_t values !, examples: idle values (UN-touched) ~ 22.000-28.000, TOUCHED: rises to 35.000-120.000! */
+   // 2. TOUCH BUTTON (if available) - check if finger is touching button (result: flg_RECORD_TOUCH is true | false) 
+   /* Detail: ESP32 and ESP32-S3 return totally different touch values !, code below should handle both scenarios
+   // ESP32:    low  uint16_t values !, examples: idle values (UN-touched) ~ 70-80, TOUCHED: 'falls down to' about 10-40
+   // ESP32-S3: high uint36_t values !, examples: idle values (UN-touched) ~ 22.000-28.000, TOUCHED: rises to 35.000-120.000! */
   
-  uint32_t current_touch;
-  if (pin_TOUCH != NO_PIN)  
-  {  current_touch = touchRead(pin_TOUCH);  
-     if (current_touch < 16383 )  // ESP32: idle value examples (UN-touched) ~ 70-80, TOUCHED: down to 10-40
-     {  flg_RECORD_TOUCH = (current_touch <= (uint32_t) (gl_TOUCH_RELEASED * 0.9)) ? true : false; // ESP32 rule: more than 10%
-     }
-     else  // ESP32-S3: idle values (UN-touched) ~ 22.000-28.000, TOUCHED: up to 30.000-120.000  // ESP32-S3: rising 10% or more
-     {  flg_RECORD_TOUCH = (current_touch >  (uint32_t) (gl_TOUCH_RELEASED * 1.1)) ? true : false;          
-     }
-  }  else flg_RECORD_TOUCH = false;  // no touch button available -> never touched
+   uint32_t current_touch;
+   if (pin_TOUCH != NO_PIN)  
+   {  current_touch = touchRead(pin_TOUCH);  
+      if (current_touch < 16383 )  // ESP32: idle value examples (UN-touched) ~ 70-80, TOUCHED: down to 10-40
+      {  flg_RECORD_TOUCH = (current_touch <= (uint32_t) (gl_TOUCH_RELEASED * 0.9)) ? true : false; // ESP32 rule: more than 10%
+      }
+      else  // ESP32-S3: idle values (UN-touched) ~ 22.000-28.000, TOUCHED: up to 30.000-120.000  // ESP32-S3: rising 10% or more
+      {  flg_RECORD_TOUCH = (current_touch >  (uint32_t) (gl_TOUCH_RELEASED * 1.1)) ? true : false;          
+      }
+   }  else flg_RECORD_TOUCH = false;  // no touch button available -> never touched
     
   
-  // ------ Read USER INPUT via Voice recording & launch Deepgram transcription -------------------------------------------------
-  // ESP32 as VOICE chat device: Recording (as long pressing or touching RECORD) & Transcription on Release (result: UserRequest)
-  // 3 different BTN actions:  PRESS & HOLD for recording || STOP (Interrupt) LLM AI speaking || REPEAT last LLM AI answer  
+   // ------ Read USER INPUT via Voice recording & launch Deepgram transcription -------------------------------------------------
+   // ESP32 as VOICE chat device: Recording (as long pressing or touching RECORD) & Transcription on Release (result: UserRequest)
+   // 3 different BTN actions:  PRESS & HOLD for recording || STOP (Interrupt) LLM AI speaking || REPEAT last LLM AI answer  
 
-  if ( flg_RECORD_BTN == LOW || flg_RECORD_TOUCH )                // # Recording started, supporting btn and touch sensor
-  {  delay(30);                                                   // unbouncing & suppressing finger button 'click' noise 
-     if (audio_play.isRunning())                                  // Before we start any recording: always stop earlier Audio 
-     {  audio_play.stopSong();                                    // [bug fix]: previous audio_play.connecttohost() won't work
-        Serial.println( "\n< STOP AUDIO >" );
-        flg_UserStoppedAudio = true;                              // to remember later that user stopped (distinguish to REPEAT)    
-     }   
-     // Now Starting Recording (no blocking, not waiting)
-     Recording_Loop();                                            // that's the main task: Recording AUDIO (ongoing)  
-  }
+   if ( flg_RECORD_BTN == LOW || flg_RECORD_TOUCH )                // # Recording started, supporting btn and touch sensor
+   {  delay(30);                                                   // unbouncing & suppressing finger button 'click' noise 
+      bot_state = LISTENING;                                       // Update LED state immediately
+      if (audio_play.isRunning())                                  // Before we start any recording: always stop earlier Audio 
+      {  audio_play.stopSong();                                    // [bug fix]: previous audio_play.connecttohost() won't work
+         Serial.println( "\n< STOP AUDIO >" );
+         flg_UserStoppedAudio = true;                              // to remember later that user stopped (distinguish to REPEAT)    
+      }   
+      // Now Starting Recording (no blocking, not waiting)
+      Recording_Loop();                                            // that's the main task: Recording AUDIO (ongoing)  
+   }
 
-  if ( flg_RECORD_BTN == HIGH && !flg_RECORD_TOUCH )              // Recording not started yet OR stopped (on release button)
-  {  
-     // now we check if RECORDING is done, we receive recording details (length etc..) via &pointer
-     // hint: Recording_Stop() is true ONCE when recording finalized and .wav is available
+   if ( flg_RECORD_BTN == HIGH && !flg_RECORD_TOUCH )              // Recording not started yet OR stopped (on release button)
+   {  
+      // now we check if RECORDING is done, we receive recording details (length etc..) via &pointer
+      // hint: Recording_Stop() is true ONCE when recording finalized and .wav is available
 
-     if (Recording_Stop( &record_SDfile, &record_buffer, &record_bytes, &record_seconds )) 
-     {  if (record_seconds > 0.4)                                 // using short btn TOUCH (<0.4 secs) for other actions
-        {  led_RGB(HIGH,LOW,LOW);                                 // LED [Update]: ## CYAN indicating Deepgram STT starting 
-           Serial.print( "\nYou {STT}> " );                       // function SpeechToText_Deepgram will append '...'
+      if (Recording_Stop( &record_SDfile, &record_buffer, &record_bytes, &record_seconds )) 
+      {  if (record_seconds > 0.4)                                 // using short btn TOUCH (<0.4 secs) for other actions
+         {  bot_state = PROCESSING;                                // Update LED state - processing transcription
+            led_RGB(HIGH,LOW,LOW);                                 // LED [Update]: ## CYAN indicating Deepgram STT starting 
+            Serial.print( "\nYou {STT}> " );                       // function SpeechToText_Deepgram will append '...'
                    
-           // Action happens here! -> Launching SpeechToText (STT) transcription (WAITING until done)
-           // using ElevenLabs STT as default (best performance, multi-lingual, high accuracy (language & word detection)
-           // Reminder: as longer the spoken sentence, as better the results in language and word detection ;)
+            // Action happens here! -> Launching SpeechToText (STT) transcription (WAITING until done)
+            // using ElevenLabs STT as default (best performance, multi-lingual, high accuracy (language & word detection)
+            // Reminder: as longer the spoken sentence, as better the results in language and word detection ;)
            
-           UserRequest = SpeechToText_ElevenLabs( record_SDfile, record_buffer, record_bytes, "", ELEVENLABS_KEY );
-           /* // alternatives (for user with DEEPGRAM API key):
-           // MULTI-lingual:   .. = SpeechToText_Deepgram( record_SDfile, record_buffer, record_bytes, "",   DEEPGRAM_KEY );
-           // Single language: .. = SpeechToText_Deepgram( record_SDfile, record_buffer, record_bytes, "en", DEEPGRAM_KEY );*/
+            UserRequest = SpeechToText_ElevenLabs( record_SDfile, record_buffer, record_bytes, "", ELEVENLABS_KEY );
+            /* // alternatives (for user with DEEPGRAM API key):
+            // MULTI-lingual:   .. = SpeechToText_Deepgram( record_SDfile, record_buffer, record_bytes, "",   DEEPGRAM_KEY );
+            // Single language: .. = SpeechToText_Deepgram( record_SDfile, record_buffer, record_bytes, "en", DEEPGRAM_KEY );*/
 
-           if (UserRequest != "")                                 // Done!. In case we got a valid spoken transcription:   
-           {  led_RGB(LOW,LOW,LOW); delay(200);                   // LED: ## WHITE FLASH (200ms) indicating success
-              led_RGB(HIGH,HIGH,HIGH); delay(100);                // LED: ## OFF (until update at eof loop()   
-           }    
-           Serial.println( "[" + UserRequest + "]" );             // printing result in Serial Monitor always              
-        }
-        else                                                      // 2 additional Actions on short button PRESS (< 0.4 secs):
-        { if (!flg_UserStoppedAudio)                              // - STOP AUDIO when playing (done above, if Btn == LOW)
-          {  Serial.println( "< REPEAT TTS >" );                  // - REPEAT last LLM answer (if audio currently not playing)
-             LLM_Feedback = LLM_Feedback_before;                  // hint: REPEAT is also helpful in the rare cases when Open AI
-          }                                                       // TTS 'missed' speaking: just tip btn again for triggering    
-          else 
-          {  // Trick: allow <REPEAT TTS> on next BTN release (LOW->HIGH) after next short recording
-             flg_UserStoppedAudio = false;                        
-          }
-        }
-     }      
-  }  
+            if (UserRequest != "")                                 // Done!. In case we got a valid spoken transcription:   
+            {  led_RGB(LOW,LOW,LOW); delay(200);                   // LED: ## WHITE FLASH (200ms) indicating success
+               led_RGB(HIGH,HIGH,HIGH); delay(100);                // LED: ## OFF (until update at eof loop()   
+            }    
+            Serial.println( "[" + UserRequest + "]" );             // printing result in Serial Monitor always              
+         }
+         else                                                      // 2 additional Actions on short button PRESS (< 0.4 secs):
+         { if (!flg_UserStoppedAudio)                              // - STOP AUDIO when playing (done above, if Btn == LOW)
+           {  Serial.println( "< REPEAT TTS >" );                  // - REPEAT last LLM answer (if audio currently not playing)
+              LLM_Feedback = LLM_Feedback_before;                  // hint: REPEAT is also helpful in the rare cases when Open AI
+           }                                                       // TTS 'missed' speaking: just tip btn again for triggering    
+           else 
+           {  // Trick: allow <REPEAT TTS> on next BTN release (LOW->HIGH) after next short recording
+              flg_UserStoppedAudio = false;                        
+           }
+         }
+      }      
+   }  
   
 
-  // ------ USER REQUEST found -> Checking KEYWORDS first -----------------------------------------------------------------------
+   // ------ USER REQUEST found -> Checking KEYWORDS first -----------------------------------------------------------------------
   
-  String cmd = UserRequest;
-  cmd.toUpperCase(); cmd.replace(".", "");
+   String cmd = UserRequest;
+   cmd.toUpperCase(); cmd.replace(".", "");
 
-  // 1. keyword 'RADIO' inside the user request -> Playing German RADIO Live Stream: SWR3
-  // Use case example (Recording request): "Please play radio for me, thanks" -> Streaming launched
+   // 1. keyword 'RADIO' inside the user request -> Playing German RADIO Live Stream: SWR3
+   // Use case example (Recording request): "Please play radio for me, thanks" -> Streaming launched
   
-  if (cmd.indexOf("RADIO") >=0 )
-  {  Serial.println( "< Streaming German RADIO: SWR3 >" );   
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD       
-     led_RGB(LOW,LOW,HIGH);                                       // LED: ## YELLOW indicating 'Stream' pending -> .. MAGENTA
-     // HINT !: the streaming can fail on some ESP32 without PSRAM (AUDIO.H issue!), in this case: deactivate/remove next line:
-     audio_play.connecttohost( "https://liveradio.swr.de/sw282p3/swr3/play.mp3" ); 
-     UserRequest = "";  // do NOT start LLM
-  } 
+   if (cmd.indexOf("RADIO") >=0 )
+   {  Serial.println( "< Streaming German RADIO: SWR3 >" );   
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD       
+      led_RGB(LOW,LOW,HIGH);                                       // LED: ## YELLOW indicating 'Stream' pending -> .. MAGENTA
+      // HINT !: the streaming can fail on some ESP32 without PSRAM (AUDIO.H issue!), in this case: deactivate/remove next line:
+      audio_play.connecttohost( "https://liveradio.swr.de/sw282p3/swr3/play.mp3" ); 
+      UserRequest = "";  // do NOT start LLM
+   } 
 
-  // 2. keyword 'DAILY NEWS' or German 'TAGESSCHAU' inside request-> Playing German TV News: Tagesschau24
-  // Use case example (Recording request): "Please stream daily news for me!" -> Streaming launched
+   // 2. keyword 'DAILY NEWS' or German 'TAGESSCHAU' inside request-> Playing German TV News: Tagesschau24
+   // Use case example (Recording request): "Please stream daily news for me!" -> Streaming launched
   
-  if (cmd.indexOf("DAILY NEWS") >=0 || cmd.indexOf("TAGESSCHAU") >=0 ) 
-  {  Serial.println( "< Streaming German Daily News TV: Tagesschau24 >" );   
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD       
-     led_RGB(LOW,LOW,HIGH);                                       // LED: ## YELLOW indicating 'Stream' pending -> .. MAGENTA
-     // HINT !: the streaming can fail on some ESP32 without PSRAM (AUDIO.H issue!), in this case: deactivate/remove next line:
-     audio_play.connecttohost( "https://icecast.tagesschau.de/ndr/tagesschau24/live/mp3/128/stream.mp3"  ); 
-     UserRequest = "";  // do NOT start LLM
-  }
+   if (cmd.indexOf("DAILY NEWS") >=0 || cmd.indexOf("TAGESSCHAU") >=0 ) 
+   {  Serial.println( "< Streaming German Daily News TV: Tagesschau24 >" );   
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD       
+      led_RGB(LOW,LOW,HIGH);                                       // LED: ## YELLOW indicating 'Stream' pending -> .. MAGENTA
+      // HINT !: the streaming can fail on some ESP32 without PSRAM (AUDIO.H issue!), in this case: deactivate/remove next line:
+      audio_play.connecttohost( "https://icecast.tagesschau.de/ndr/tagesschau24/live/mp3/128/stream.mp3"  ); 
+      UserRequest = "";  // do NOT start LLM
+   }
 
-  // 3. keyword 'VOICE' (or German 'STIMME') anywhere in sentence -> Use (and remember) USER statement as 'Voice Instruction'
-  // Background: Open TTS API supports 'voice instruction' (kind of 'voice system prompt) for customizing voice 'character'
-  // We utilize this capability via keyword 'VOICE' -> sending request to LLM + Instruction (latest AUDIO.H + PSRAM needed!)
-  // Use case example (Recording request): "Can you speak in silent voice please or whispering ?" -> Test it once ;)
+   // 3. keyword 'VOICE' (or German 'STIMME') anywhere in sentence -> Use (and remember) USER statement as 'Voice Instruction'
+   // Background: Open TTS API supports 'voice instruction' (kind of 'voice system prompt) for customizing voice 'character'
+   // We utilize this capability via keyword 'VOICE' -> sending request to LLM + Instruction (latest AUDIO.H + PSRAM needed!)
+   // Use case example (Recording request): "Can you speak in silent voice please or whispering ?" -> Test it once ;)
   
-  if (cmd == "VOICE" || cmd == "STIMME")                          // single word 'VOICE' only: Reset voice instruction prompt
-  {  Serial.println( "< Voice instruction removed >" );           // (global var, will also be erased in TTS if friend changed)
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD      
-     gl_voice_instruct = ""; cmd = "";
-     UserRequest = "";  // do NOT start LLM
-  }
-  if (cmd.indexOf("VOICE") >=0 || cmd.indexOf("STIMME") >=0 )     // request contains word 'VOICE' -> force voice instruction
-  {  Serial.println( "< Voice instruction stored > [" + UserRequest + "]");   
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
-     gl_voice_instruct = UserRequest;                             // global var, will be erased in TTS (in case friend changed)    
-     // NOT erasing UserRequest -> starting LLM too
-  }
+   if (cmd == "VOICE" || cmd == "STIMME")                          // single word 'VOICE' only: Reset voice instruction prompt
+   {  Serial.println( "< Voice instruction removed >" );           // (global var, will also be erased in TTS if friend changed)
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD      
+      gl_voice_instruct = ""; cmd = "";
+      UserRequest = "";  // do NOT start LLM
+   }
+   if (cmd.indexOf("VOICE") >=0 || cmd.indexOf("STIMME") >=0 )     // request contains word 'VOICE' -> force voice instruction
+   {  Serial.println( "< Voice instruction stored > [" + UserRequest + "]");   
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
+      gl_voice_instruct = UserRequest;                             // global var, will be erased in TTS (in case friend changed)    
+      // NOT erasing UserRequest -> starting LLM too
+   }
 
-  // 4. Toggling DEBUG mode ON|OFF during runtime (ON: enable progress details in Serial Monitor, OFF: minimize Serial I/O) 
-  if (cmd.indexOf("DEBUG ON") >=0 )                               
-  {  Serial.println( "< DEBUG ON >");                             // toggling DEBUG mode 'ON' via command (keyboard or STT)    
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
-     DEBUG = true;
-     UserRequest = "";  // do NOT start LLM
-  }
-  if (cmd.indexOf("DEBUG OFF") >=0 )                              
-  {  Serial.println( "< DEBUG OFF >");                            // toggling DEBUG 'OFF'  
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
-     DEBUG = false;
-     UserRequest = "";  // do NOT start LLM
-  }  
+   // 4. Toggling DEBUG mode ON|OFF during runtime (ON: enable progress details in Serial Monitor, OFF: minimize Serial I/O) 
+   if (cmd.indexOf("DEBUG ON") >=0 )                               
+   {  Serial.println( "< DEBUG ON >");                             // toggling DEBUG mode 'ON' via command (keyboard or STT)    
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
+      DEBUG = true;
+      UserRequest = "";  // do NOT start LLM
+   }
+   if (cmd.indexOf("DEBUG OFF") >=0 )                              
+   {  Serial.println( "< DEBUG OFF >");                            // toggling DEBUG 'OFF'  
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
+      DEBUG = false;
+      UserRequest = "";  // do NOT start LLM
+   }  
 
-  // 5. key COMMAND '#' or speaking SINGLE word 'HASHTAG'         -> Serial Monitor Print of complete CHAT history 
-  // logic is done in lib_openai.ino (in OpenAI_Groq_LLM()), here we trigger LED only prior launching LLM
-  if (cmd == "#" || cmd == "HASHTAG")                             // this trick allows to trigger via voice (just say 'Hashtag')
-  {  led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
-     UserRequest = "#";                                           // rest of logic is done inside 'lib_openai..ino'
-  }  
+   // 5. key COMMAND '#' or speaking SINGLE word 'HASHTAG'         -> Serial Monitor Print of complete CHAT history 
+   // logic is done in lib_openai.ino (in OpenAI_Groq_LLM()), here we trigger LED only prior launching LLM
+   if (cmd == "#" || cmd == "HASHTAG")                             // this trick allows to trigger via voice (just say 'Hashtag')
+   {  led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
+      UserRequest = "#";                                           // rest of logic is done inside 'lib_openai..ino'
+   }  
 
-  // 6. key COMMAND '@' or keyword 'EMAIL' INSIDE request sentence -> sending complete CHAT history to user email account
-  // logic is done in lib_openai.ino (in OpenAI_Groq_LLM()), here we trigger LED only prior launching LLM
-  cmd.replace("E-MAIL","EMAIL"); cmd.replace("E MAIL", "EMAIL");  // cleaning STT variations
-  if (cmd == "@" || cmd.indexOf("EMAIL") >=0 )                    // enter @ or speak sentence with 'EMAIL' included
-  {  Serial.println( "< Email request, sending complete chat history to smtp server >");
-     led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
-     UserRequest = "@";                                           // rest of logic is done inside 'lib_openai..ino'
-  }
+   // 6. key COMMAND '@' or keyword 'EMAIL' INSIDE request sentence -> sending complete CHAT history to user email account
+   // logic is done in lib_openai.ino (in OpenAI_Groq_LLM()), here we trigger LED only prior launching LLM
+   cmd.replace("E-MAIL","EMAIL"); cmd.replace("E MAIL", "EMAIL");  // cleaning STT variations
+   if (cmd == "@" || cmd.indexOf("EMAIL") >=0 )                    // enter @ or speak sentence with 'EMAIL' included
+   {  Serial.println( "< Email request, sending complete chat history to smtp server >");
+      led_RGB(LOW,HIGH,HIGH); delay(200);                          // LED: ## RED Flash (200ms) on detected KEYWORD  
+      UserRequest = "@";                                           // rest of logic is done inside 'lib_openai..ino'
+   }
 
-  // 7. keyword 'GOOGLE' -> launching Open AI WEB SEARCH feature 
-  // ... handled in LLM call below
+   // 7. keyword 'GOOGLE' -> launching Open AI WEB SEARCH feature 
+   // ... handled in LLM call below
 
    
-  // ------ USER REQUEST found -> Call OpenAI_Groq_LLM() ------------------------------------------------------------------------
-  // Utilizing new 'real-time' web search feature in case user request contains the keyword 'GOOGLE' 
-  // [using same 'OpenAI_Groq_LLM(..)' function with additional parameter (function switches to dedicated LLM search model]
-  // Recap: OpenAI_Groq_LLM() remembers complete history (appending prompts) to support ongoing dialogs (web searches included;)
+   // ------ USER REQUEST found -> Call OpenAI_Groq_LLM() ------------------------------------------------------------------------
+   // Utilizing new 'real-time' web search feature in case user request contains the keyword 'GOOGLE' 
+   // [using same 'OpenAI_Groq_LLM(..)' function with additional parameter (function switches to dedicated LLM search model]
+   // Recap: OpenAI_Groq_LLM() remembers complete history (appending prompts) to support ongoing dialogs (web searches included;)
   
-  if (UserRequest != "" ) 
-  { 
-    // [bugfix/new]: ensure that all TTS websockets are closed prior open LLM websockets (otherwise LLM connection fails)
-    audio_play.stopSong();    // stop potential audio (closing AUDIO.H TTS sockets to free up the HEAP) 
+   if (UserRequest != "" ) 
+   { 
+     bot_state = PROCESSING;                                      // Update LED state - AI is thinking
+     // [bugfix/new]: ensure that all TTS websockets are closed prior open LLM websockets (otherwise LLM connection fails)
+     audio_play.stopSong();    // stop potential audio (closing AUDIO.H TTS sockets to free up the HEAP) 
     
-    // CASE 1: launch Open AI WEB SEARCH feature if user request includes the keyword 'Google'
-    // supporting User requests like 'Will it rain tomorrow in my region?, please ask Google'
+     // CASE 1: launch Open AI WEB SEARCH feature if user request includes the keyword 'Google'
+     // supporting User requests like 'Will it rain tomorrow in my region?, please ask Google'
         
-    if ( UserRequest.indexOf("Google") >= 0 || UserRequest.indexOf("GOOGLE") >= 0 )                          
-    {  
-       led_RGB(LOW,HIGH,LOW);                                     // LED: ## MAGENTA indicating Open AI WEB SEARCH Request 
-       Serial.print( "LLM AI WEB SEARCH> " );                     // function OpenAI_Groq_LLM() will Serial.print '...'
+     if ( UserRequest.indexOf("Google") >= 0 || UserRequest.indexOf("GOOGLE") >= 0 )                          
+     {  
+        led_RGB(LOW,HIGH,LOW);                                     // LED: ## MAGENTA indicating Open AI WEB SEARCH Request 
+        Serial.print( "LLM AI WEB SEARCH> " );                     // function OpenAI_Groq_LLM() will Serial.print '...'
        
-       // 2 workarounds are recommended to utilize the new Open AI Web Search for TTS (speaking the response).
-       // Background: New Open AI Web Search models are not intended for TTS (much too detailed, including lists & links etc.)
-       // and they are also 'less' prompt sensitive, means ignoring earlier instructions (e.g. 'shorten please!') quite often 
-       // so we use 2 tricks: 1. adding a 'default' instruction each time (forcing 'short answers') + 2. removing remaining links
-       // KEEP in mind: SEARCH models are slower (response delayed) than CHAT models, so we use on (GOOGLE) demand only !
+        // 2 workarounds are recommended to utilize the new Open AI Web Search for TTS (speaking the response).
+        // Background: New Open AI Web Search models are not intended for TTS (much too detailed, including lists & links etc.)
+        // and they are also 'less' prompt sensitive, means ignoring earlier instructions (e.g. 'shorten please!') quite often 
+        // so we use 2 tricks: 1. adding a 'default' instruction each time (forcing 'short answers') + 2. removing remaining links
+        // KEEP in mind: SEARCH models are slower (response delayed) than CHAT models, so we use on (GOOGLE) demand only !
        
-       // 1. forcing a short answer via appending prompt postfix - hard coded GOAL:
-       String Postfix = ". Summarize in few sentences, do NOT use any enumerations, line breaks or web links!"; 
-       String Prompt_Enhanced = UserRequest + Postfix;   
+        // 1. forcing a short answer via appending prompt postfix - hard coded GOAL:
+        String Postfix = ". Summarize in few sentences, do NOT use any enumerations, line breaks or web links!"; 
+        String Prompt_Enhanced = UserRequest + Postfix;   
                                                                             
-       // Action happens here! (WAITING until Open AI web search is done)        
-       LLM_Feedback = OpenAI_Groq_LLM( Prompt_Enhanced, OPENAI_KEY, true, GROQ_KEY );   // 'true' means: launch WEB SEARCH model
+        // Action happens here! (WAITING until Open AI web search is done)        
+        LLM_Feedback = OpenAI_Groq_LLM( Prompt_Enhanced, OPENAI_KEY, true, GROQ_KEY );   // 'true' means: launch WEB SEARCH model
 
-       // 2. even in case WEB_SEARCH_ADDON contains a instruction 'no links please!: there are still rare situation that 
-       // links are included (eof search results). So we cut them manually  (prior sending to TTS / Audio speaking)
+        // 2. even in case WEB_SEARCH_ADDON contains a instruction 'no links please!: there are still rare situation that 
+        // links are included (eof search results). So we cut them manually  (prior sending to TTS / Audio speaking)
        
-       int any_links = LLM_Feedback.indexOf( "([" );                    // Trick 2: searching for potential links at the end
-       if ( any_links > 0 )                                             // (they typically start with '([..'  
-       {  Serial.println( "\n>>> RAW: [" + LLM_Feedback + "]" );        // Serial Monitor: printing both, TTS: uses cutted only  
-          LLM_Feedback = LLM_Feedback.substring(0, any_links) + "|";    // ('|' just as 'cut' indicator for Serial Monitor)
-          Serial.print( ">>> CUTTED for TTS:" );    
-       } 
-    }
+        int any_links = LLM_Feedback.indexOf( "([" );                    // Trick 2: searching for potential links at the end
+        if ( any_links > 0 )                                             // (they typically start with '([..'  
+        {  Serial.println( "\n>>> RAW: [" + LLM_Feedback + "]" );        // Serial Monitor: printing both, TTS: uses cutted only  
+           LLM_Feedback = LLM_Feedback.substring(0, any_links) + "|";    // ('|' just as 'cut' indicator for Serial Monitor)
+           Serial.print( ">>> CUTTED for TTS:" );    
+        } 
+     }
     
-    else  // CASE 2 [DEFAULT]: LLM chat completion model (for human like conversations)  
+     else  // CASE 2 [DEFAULT]: LLM chat completion model (for human like conversations)  
     
-    {  led_RGB(HIGH,HIGH,LOW);                                    // LED: ## BLUE indicating LLM AI CHAT Request starting 
-       Serial.print( "LLM AI CHAT> " );                           // function OpenAI_Groq_LLM() will Serial.print '...'
+     {  led_RGB(HIGH,HIGH,LOW);                                    // LED: ## BLUE indicating LLM AI CHAT Request starting 
+        Serial.print( "LLM AI CHAT> " );                           // function OpenAI_Groq_LLM() will Serial.print '...'
        
-       // Action happens here! (WAITING until Open AI or Groq done)
-       LLM_Feedback = OpenAI_Groq_LLM( UserRequest, OPENAI_KEY, false, GROQ_KEY );    // 'false' means: default CHAT model                                 
-    }
+        // Action happens here! (WAITING until Open AI or Groq done)
+        LLM_Feedback = OpenAI_Groq_LLM( UserRequest, OPENAI_KEY, false, GROQ_KEY );    // 'false' means: default CHAT model                                 
+     }
           
-    // final tasks (always):
+     // final tasks (always):
     
-    if (LLM_Feedback != "")                                       // in case we got any valid feedback ..  
-    { led_RGB(LOW,LOW,LOW); delay(200);                           // -> LED: ## WHITE FLASH (200ms)    
-      led_RGB(HIGH,HIGH,HIGH); delay(100);  
+     if (LLM_Feedback != "")                                       // in case we got any valid feedback ..  
+     { led_RGB(LOW,LOW,LOW); delay(200);                           // -> LED: ## WHITE FLASH (200ms)    
+       led_RGB(HIGH,HIGH,HIGH); delay(100);  
             
-      int id;  String names, model, voice, vspeed, instruction, welcome;     // to get name of current LLM agent (friend)                  
-      get_tts_param( &id, &names, &model, &voice, &vspeed, &instruction, &welcome );      
-      Serial.println( " [" + names + "]" + " [" + LLM_Feedback + "]" );  
+       int id;  String names, model, voice, vspeed, instruction, welcome;     // to get name of current LLM agent (friend)                  
+       get_tts_param( &id, &names, &model, &voice, &vspeed, &instruction, &welcome );      
+       Serial.println( " [" + names + "]" + " [" + LLM_Feedback + "]" );  
           
-      LLM_Feedback_before = LLM_Feedback;                           
-    }           
-    else Serial.print("\n");   
-  }
+       LLM_Feedback_before = LLM_Feedback;                           
+     }           
+     else Serial.print("\n");   
+   }
 
 
-  // ------ Speak LLM answer (using Open AI voices by default, all voice settings done in TextToSpeech() ------------------------
+   // ------ Speak LLM answer (using Open AI voices by default, all voice settings done in TextToSpeech() ------------------------
  
-  if (LLM_Feedback != "") 
-  {  led_RGB(LOW,LOW,HIGH);                                       // LED: ## YELLOW indicating 'TTS' audio pending 
+   if (LLM_Feedback != "") 
+   {  bot_state = SPEAKING;                                        // Update LED state - AI is speaking
+      led_RGB(LOW,LOW,HIGH);                                       // LED: ## YELLOW indicating 'TTS' audio pending 
 
-     // simple TTS call: TextToSpeech() manages all voice parameter for current active AI agent (FRIEND[x])
-     TextToSpeech( LLM_Feedback );         
-  }
+      // simple TTS call: TextToSpeech() manages all voice parameter for current active AI agent (FRIEND[x])
+      TextToSpeech( LLM_Feedback );         
+   }
 
     
-  // Adjusting AUDIO Volume (either via Analogue POTI or via toggle button) -----------------------------------------------------
+   // Adjusting AUDIO Volume (either via Analogue POTI or via toggle button) -----------------------------------------------------
   
-  if (pin_VOL_POTI != NO_PIN)     // --- KALO default: if available then using an POTI to adjust Audio Volume continuously 
-  {  static long millis_before = millis();  
-     static int  volume_before;
-     // reading POTI, rarely only (e.g. 4 times/sec and only if diff >= 2) to avoid unnecessary audio flickering
-     if (millis() > (millis_before + 250))  // each 250ms 
-     { millis_before = millis(); 
-       int volume = map( analogRead(pin_VOL_POTI), 0, 4095, 0, 21 );
-       if ( abs(volume-volume_before) >= 1  )    
-       {  volume_before = volume;
-          Serial.println( "New Audio Volume: [" + (String) volume + "]" );   
-          audio_play.setVolume(volume);  // AUDIO: values from 0 to 21          
-       }    
-     } 
-  }
+   if (pin_VOL_POTI != NO_PIN)     // --- KALO default: if available then using an POTI to adjust Audio Volume continuously 
+   {  static long millis_before = millis();  
+      static int  volume_before;
+      // reading POTI, rarely only (e.g. 4 times/sec and only if diff >= 2) to avoid unnecessary audio flickering
+      if (millis() > (millis_before + 250))  // each 250ms 
+      { millis_before = millis(); 
+        int volume = map( analogRead(pin_VOL_POTI), 0, 4095, 0, 21 );
+        if ( abs(volume-volume_before) >= 1  )    
+        {  volume_before = volume;
+           Serial.println( "New Audio Volume: [" + (String) volume + "]" );   
+           audio_play.setVolume(volume);  // AUDIO: values from 0 to 21          
+        }    
+      } 
+   }
     
-  if (pin_VOL_BTN != NO_PIN)      // --- Alternative: using a VOL_BTN to toggle thru N values (e.g. TECHISMS or Elato AI pcb)
-  {  static bool flg_volume_updated = false; 
-     static int volume_level = -1; 
-     if (digitalRead(pin_VOL_BTN) == LOW && !flg_volume_updated)          
-     {  int steps = sizeof(gl_VOL_STEPS) / sizeof(gl_VOL_STEPS[0]);  // typically: 3 steps (any arrays supported)
-        volume_level = ((volume_level+1) % steps);  // walking in circle (starting with 0): e.g. 0 -> 1 -> 2 -> 0 ..
-        Serial.println( "New Audio Volume: [" + (String) volume_level + "] = " + (String) gl_VOL_STEPS[volume_level] );
-        // visualize to user with ## WHITE FLASHES (with OFF between flashes)
-        for (int i=0; i<=volume_level; i++)  
-        {  led_RGB(LOW,LOW,LOW); delay(80); led_RGB(HIGH,HIGH,HIGH); delay(120);  // ## WHITE flash 80ms, ## OFF 120ms                          
-        }   
-        flg_volume_updated = true;
-        audio_play.setVolume( gl_VOL_STEPS[volume_level] );  
-    }
-    if (digitalRead(pin_VOL_BTN) == HIGH && flg_volume_updated)         
-    {  flg_volume_updated = false;    
-    }
-  }
+   if (pin_VOL_BTN != NO_PIN)      // --- Alternative: using a VOL_BTN to toggle thru N values (e.g. TECHISMS or Elato AI pcb)
+   {  static bool flg_volume_updated = false; 
+      static int volume_level = -1; 
+      if (digitalRead(pin_VOL_BTN) == LOW && !flg_volume_updated)          
+      {  int steps = sizeof(gl_VOL_STEPS) / sizeof(gl_VOL_STEPS[0]);  // typically: 3 steps (any arrays supported)
+         volume_level = ((volume_level+1) % steps);  // walking in circle (starting with 0): e.g. 0 -> 1 -> 2 -> 0 ..
+         Serial.println( "New Audio Volume: [" + (String) volume_level + "] = " + (String) gl_VOL_STEPS[volume_level] );
+         // visualize to user with ## WHITE FLASHES (with OFF between flashes)
+         for (int i=0; i<=volume_level; i++)  
+         {  led_RGB(LOW,LOW,LOW); delay(80); led_RGB(HIGH,HIGH,HIGH); delay(120);  // ## WHITE flash 80ms, ## OFF 120ms                          
+         }   
+         flg_volume_updated = true;
+         audio_play.setVolume( gl_VOL_STEPS[volume_level] );  
+     }
+     if (digitalRead(pin_VOL_BTN) == HIGH && flg_volume_updated)         
+     {  flg_volume_updated = false;    
+     }
+   }
   
   
-  // ----------------------------------------------------------------------------------------------------------------------------
-  // Play AUDIO (Schreibfaul1 loop for Play Audio (details here: https://github.com/schreibfaul1/ESP32-audioI2S))
-  // and updating LED status
+   // ----------------------------------------------------------------------------------------------------------------------------
+   // Play AUDIO (Schreibfaul1 loop for Play Audio (details here: https://github.com/schreibfaul1/ESP32-audioI2S))
+   // and updating LED status
 
-  audio_play.loop();  
-  vTaskDelay(1); 
+   audio_play.loop();  
+   vTaskDelay(1); 
 
-  // update LED status always (in addition to WHITE flashes + YELLOW on STT + BLUE on LLM + CYAN on TTS)
-  if (flg_RECORD_BTN==LOW || flg_RECORD_TOUCH) { led_RGB(LOW,HIGH,HIGH); }  // led RED as long the record ongoing
-  else if (audio_play.isRunning())             { led_RGB(LOW,HIGH,LOW);  }  // led MAGENTA when Open AI voice is speaking 
-  else                                         { led_RGB(HIGH,LOW,HIGH); }  // led GREEN (default) when ready for next request 
-    
+   // Update LED state based on current activity
+   if (flg_RECORD_BTN == LOW || flg_RECORD_TOUCH)
+   {  bot_state = LISTENING;
+   }  
+   else if (audio_play.isRunning())
+   {  bot_state = SPEAKING;
+   }  
+   else
+   {  bot_state = IDLE;
+   }
+   
+   // Run LED animations for current state
+   run_LED_Effects();
+
 }
 
 // end of LOOP() ****************************************************************************************************************
@@ -678,25 +709,6 @@ void loop()
 // ------------------------------------------------------------------------------------------------------------------------------
 // Updating LED with RGB on/off values  
 // ------------------------------------------------------------------------------------------------------------------------------
-
-void led_RGB( bool red, bool green, bool blue ) 
-{ // general usage: using LOW in code switches the LED color on, e.g. led_RGB(LOW,HIGH,HIGH) means RED on   
-  // using static vars, reason: writing to real pin only if changed (increasing performance for frequently repeated calls)
-  
-  static bool red_before=HIGH, green_before=HIGH, blue_before=HIGH;  // memo: HIGH is same as true(1), LOW is false(0)
-
-  if (flg_LED_DIGITAL)   // Default [KALO pcb or Elato AI]: using complete Vcc (soldered serial resistors exist), common Anode 
-  {  if (red   != red_before)   { digitalWrite(pin_LED_RED,red);     red_before=red;     }     
-     if (green != green_before) { digitalWrite(pin_LED_GREEN,green); green_before=green; }      
-     if (blue  != blue_before)  { digitalWrite(pin_LED_BLUE,blue);   blue_before=blue;   }      
-  }   
-  if (!flg_LED_DIGITAL)  // Exception [e.g. TECHIESMS pcb]: LED with common GND, missed resistors (so we must reduce voltage)
-  {  // writing analog values 0 or max. ~40 (not 255!, means no digitalWrite!) 
-     if (red   != red_before)   { analogWrite(pin_LED_RED,  (red==LOW)?   40:0 );  red_before=red;     }      
-     if (green != green_before) { analogWrite(pin_LED_GREEN,(green==LOW)? 40:0 );  green_before=green; }      
-     if (blue  != blue_before)  { analogWrite(pin_LED_BLUE, (blue==LOW)?  40:0 );  blue_before=blue;   }   
-  }   
-}
 
 
 
@@ -786,4 +798,134 @@ void TextToSpeech( String p_request )
 void audio_showstreamtitle(const char *info) {
     Serial.print("\n>>> AUDIO.H HTTP ERROR/INFO: ");
     Serial.println(info);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------
+// Enhanced LED Effects Engine with Advanced Patterns for All 3 LED Types
+// Controls: 1. RGB LEDs (Digital), 2. 12V White Strip (PWM), 3. Status Indicator (Fast Blink)
+// BotState patterns:
+// IDLE:       Soft breathing white + RGB dim pulse
+// LISTENING:  Bright white + solid cyan RGB + solid status LED
+// PROCESSING: Pulsing white + blinking red/white RGB + fast blinking status
+// SPEAKING:   Deep pulsing white + color-cycling RGB + slow blinking status
+void run_LED_Effects() {
+  static unsigned long last_update = 0;
+  static int brightness = 0;
+  static int fadeAmount = 3;
+  static unsigned long last_blink = 0;
+  static bool blink_state = false;
+
+  // --- Update timings (every 30ms for main strip, varies for status) ---
+  if (millis() - last_update > 30) {
+    last_update = millis();
+
+    if (bot_state == IDLE) {
+      // --- IDLE: Gentle breathing effect ---
+      brightness = brightness + fadeAmount;
+      if (brightness <= 15 || brightness >= 120) {
+        fadeAmount = -fadeAmount;
+      }
+      analogWrite(pin_LED_MAIN, brightness);
+
+      // RGB LEDs: soft dim pulse
+      int rgb_brightness = map(brightness, 15, 120, 50, 200);
+      digitalWrite(pin_LED_RED, rgb_brightness > 100 ? HIGH : LOW);
+      digitalWrite(pin_LED_GREEN, rgb_brightness > 100 ? HIGH : LOW);
+      digitalWrite(pin_LED_BLUE, rgb_brightness > 100 ? HIGH : LOW);
+    }
+    else if (bot_state == LISTENING) {
+      // --- LISTENING: Bright and alert ---
+      analogWrite(pin_LED_MAIN, 255);
+      digitalWrite(pin_LED_RED, LOW);
+      digitalWrite(pin_LED_GREEN, HIGH);
+      digitalWrite(pin_LED_BLUE, HIGH);
+    }
+    else if (bot_state == PROCESSING) {
+      // --- PROCESSING: Fast pulsing with red/white RGB ---
+      brightness = brightness + (fadeAmount * 1.5);
+      if (brightness <= 80 || brightness >= 200) {
+        fadeAmount = -fadeAmount;
+      }
+      analogWrite(pin_LED_MAIN, brightness);
+
+      if ((millis() / 150) % 2 == 0) {
+        digitalWrite(pin_LED_RED, HIGH);
+        digitalWrite(pin_LED_GREEN, LOW);
+        digitalWrite(pin_LED_BLUE, LOW);
+      } else {
+        digitalWrite(pin_LED_RED, HIGH);
+        digitalWrite(pin_LED_GREEN, HIGH);
+        digitalWrite(pin_LED_BLUE, HIGH);
+      }
+    }
+    else if (bot_state == SPEAKING) {
+      // --- SPEAKING: Deep pulsing with color-cycling RGB ---
+      brightness = brightness + fadeAmount;
+      if (brightness <= 50 || brightness >= 255) {
+        fadeAmount = -fadeAmount;
+      }
+      analogWrite(pin_LED_MAIN, brightness);
+
+      // Color cycling through patterns every 400ms
+      int color_phase = (millis() / 400) % 4;
+      switch (color_phase) {
+        case 0: // MAGENTA
+          digitalWrite(pin_LED_RED, HIGH);
+          digitalWrite(pin_LED_GREEN, LOW);
+          digitalWrite(pin_LED_BLUE, HIGH);
+          break;
+        case 1: // CYAN
+          digitalWrite(pin_LED_RED, LOW);
+          digitalWrite(pin_LED_GREEN, HIGH);
+          digitalWrite(pin_LED_BLUE, HIGH);
+          break;
+        case 2: // YELLOW
+          digitalWrite(pin_LED_RED, HIGH);
+          digitalWrite(pin_LED_GREEN, HIGH);
+          digitalWrite(pin_LED_BLUE, LOW);
+          break;
+        case 3: // WHITE
+          digitalWrite(pin_LED_RED, HIGH);
+          digitalWrite(pin_LED_GREEN, HIGH);
+          digitalWrite(pin_LED_BLUE, HIGH);
+          break;
+      }
+    }
+  }
+
+  // --- Status LED indicator blinking patterns ---
+  if (bot_state == IDLE) {
+    digitalWrite(pin_LED_STATUS, LOW);
+  }
+  else if (bot_state == LISTENING) {
+    digitalWrite(pin_LED_STATUS, HIGH);
+  }
+  else if (bot_state == PROCESSING) {
+    if (millis() - last_blink > 100) {
+      last_blink = millis();
+      blink_state = !blink_state;
+      digitalWrite(pin_LED_STATUS, blink_state ? HIGH : LOW);
+    }
+  }
+  else if (bot_state == SPEAKING) {
+    if (millis() - last_blink > 400) {
+      last_blink = millis();
+      blink_state = !blink_state;
+      digitalWrite(pin_LED_STATUS, blink_state ? HIGH : LOW);
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------------------------------------------------------
+// Legacy override for old code calls
+// --- RGB LED control function (used by legacy keyword detection code) ---
+// Maps HIGH/LOW to proper transistor logic (inverted due to NPN transistor setup)
+void led_RGB(bool red, bool green, bool blue) 
+{ 
+  // Due to transistor-based control: LOW = ON, HIGH = OFF
+  // But this function expects: true = ON, false = OFF
+  // So we control them directly based on input
+  digitalWrite(pin_LED_RED, red ? LOW : HIGH);     // LOW voltage = LED ON (via transistor)
+  digitalWrite(pin_LED_GREEN, green ? LOW : HIGH);
+  digitalWrite(pin_LED_BLUE, blue ? LOW : HIGH);
 }
